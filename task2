@@ -9,95 +9,116 @@
 #include <main.h>
 #include "leds.h"
 #include "spi_comm.h"
-#include "sensors/proximity.h" [cite: 36]
-#include "motors.h" [cite: 147]
+#include "sensors/proximity.h"
+#include "motors.h"
 
-/* Inter-process communication bus definition [cite: 37, 38, 39, 40] */
+
+
 messagebus_t bus;
 MUTEX_DECL(bus_lock);
 CONDVAR_DECL(bus_condvar);
 
-/* Helper function to find the maximum of two values */
 static inline int imax(int a, int b){ return (a>b)?a:b; }
 
 int main(void)
 {
-    /* Mandatory Initialisations [cite: 8, 12, 13, 14] */
+
     halInit();
     chSysInit();
     mpu_init();
 
-    /* Proximity Sensor Initialisation [cite: 41, 42, 43, 45, 46] */
+    // Proximity
     messagebus_init(&bus, &bus_lock, &bus_condvar);
-    proximity_start(); 
+    proximity_start(0);
     calibrate_ir();
 
-    /* LED Initialisation [cite: 16, 17, 23, 24] */
+    //LED
     clear_leds();
     spi_comm_start();
 
-    /* Motors Initialisation [cite: 149, 150] */
+    //Motors
     motors_init();
 
-    /* --- Thresholds for Task 2 (Chasing) --- */
-    const int CHASE_TH     = 200;   // Minimum signal to detect "prey"
-    const int COLLISION_TH = 1500;  // Signal strength to stop before hitting object
-    const int MAX_SPEED    = 500;   // Speed within allowed [-1000, 1000] range [cite: 148]
+//    /* Infinite loop. */
+//    const int TRIGGER=220;
+//    const int RELEASE=500;
+//    bool blocked=false;
 
-    while (1)
-    {
-        /* Get calibrated readings from front-right (0) and front-left (7) [cite: 49, 50] */
-        int rf = get_calibrated_prox(0); 
-        int lf = get_calibrated_prox(7); 
-        int front = imax(rf, lf);
 
-        /* 1) COLLISION AVOIDANCE: Stop if object is too close */
-        if (front > COLLISION_TH) {
-            left_motor_set_speed(0); [cite: 152]
-            right_motor_set_speed(0); [cite: 153]
-            
-            // Visual feedback: Turn on Front LED when stopped [cite: 32, 33]
-            set_front_led(1); 
-        }
-        
-        /* 2) CHASE LOGIC: Move toward the detected object */
-        else if (front > CHASE_TH) {
-            set_front_led(0); // Object is at a safe distance [cite: 33]
-            
-            if (lf > rf + 50) {
-                // Object is more to the left -> Turn Left to chase
-                left_motor_set_speed(MAX_SPEED * 0.2); 
-                right_motor_set_speed(MAX_SPEED); [cite: 153]
-            } 
-            else if (rf > lf + 50) {
-                // Object is more to the right -> Turn Right to chase
-                left_motor_set_speed(MAX_SPEED); [cite: 152]
-                right_motor_set_speed(MAX_SPEED * 0.2); 
-            } 
-            else {
-                // Object is centered -> Go straight toward it
-                left_motor_set_speed(MAX_SPEED); [cite: 152]
-                right_motor_set_speed(MAX_SPEED); [cite: 153]
-            }
-        }
-        
-        /* 3) SEARCH LOGIC: If nothing is seen, spin in place to find the object */
-        else {
-            set_front_led(0); [cite: 33]
-            left_motor_set_speed(300); [cite: 152]
-            right_motor_set_speed(-300); [cite: 153]
-        }
 
-        /* Continuous LED status [cite: 29, 31] */
-        set_rgb_led(LED2, 0, 5, 0); // Green LEDs while active
-        set_body_led(1); 
 
-        /* Loop delay to allow system threads to process [cite: 201, 202] */
-        chThdSleepMilliseconds(50); 
+    // --- thresholds  ---
+       const int FRONT_TH = 320;   // head-on detection threshold
+       const int SIDE_TH  = 250;   // side obstacle detection threshold
+       const int DELTA    = 50;    // small margin to choose left vs right
+
+       while (1)
+       {
+           // FRONT sensors
+           int rf = get_calibrated_prox(0); // front-right
+           int lf = get_calibrated_prox(7); // front-left
+
+           // SIDE sensors
+           int rside = imax(get_calibrated_prox(1), get_calibrated_prox(2)); // right flank
+           int lside = imax(get_calibrated_prox(5), get_calibrated_prox(6)); // left flank
+
+           int front = imax(rf, lf); // overall front signal
+
+
+           // 1) Head-on obstacle
+           if (front > FRONT_TH) {
+
+        	   if ((lf > rf - DELTA) && (lf < rf + DELTA)) {
+
+        	           // Reverse a bit to create turning space
+        	           left_motor_set_speed(-400);
+        	           right_motor_set_speed(-400);
+        	           chThdSleepMilliseconds(150);
+
+        	           // Then turn (choose one direction → here: turn left)
+        	           left_motor_set_speed(500);
+        	           right_motor_set_speed(-500);
+        	           chThdSleepMilliseconds(50);
+
+        	           continue;}
+               if (lf > rf + DELTA) {
+                   // more obstacle on left-front → pivot RIGHT
+                   left_motor_set_speed(-500);
+                   right_motor_set_speed(500);
+                   
+               } else {
+                   // more obstacle on right-front → pivot LEFT
+                   left_motor_set_speed(500);
+                   right_motor_set_speed(-500);
+                  
+               }
+           }
+           // 2) Side obstacles
+           else if (rside > SIDE_TH && lside <= SIDE_TH) {
+               // obstacle on right → turn LEFT
+               left_motor_set_speed(500);
+               right_motor_set_speed(-500);
+           }
+           else if (lside > SIDE_TH && rside <= SIDE_TH) {
+               // obstacle on left, turn RIGHT
+               left_motor_set_speed(-500);
+               right_motor_set_speed(500);
+           }
+           // 3) Clear path, go straight
+           else {
+               left_motor_set_speed(700);
+               right_motor_set_speed(700);
+           }
+           set_rgb_led (LED8, 1, 0, 1);
+           set_rgb_led (LED2, 1, 0, 1);
+           set_rgb_led (LED4, 1, 0, 1);
+           set_rgb_led (LED6, 1, 0, 1);
+           set_front_led (1);
+           set_body_led(2);
+           chThdSleepMilliseconds(50); // loop delay
+       }
     }
-}
 
-/* Stack Protection for Real-Life Hardware Safety */
 #define STACK_CHK_GUARD 0xe2dee396
 uintptr_t __stack_chk_guard = STACK_CHK_GUARD;
 
