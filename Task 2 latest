@@ -48,10 +48,10 @@ static inline int clamp(int v, int lo, int hi)
 #define BASE_SPEED       750   /* forward speed while following               */
 #define MAX_STEER        600   /* maximum steering correction added/subtracted*/
 
-#define DETECT_TH        15    /* front/side detection threshold              */
+#define DETECT_TH        8    /* front/side detection threshold              */
 #define STOP_NEAR        650   /* too close — enter HOLD                      */
 #define STOP_FAR         300   /* comfortable distance — leave HOLD           */
-#define LOST_TH          10    /* all sensors below this → back to SEARCH     */
+#define LOST_TH          8    /* all sensors below this → back to SEARCH     */
 
 #define STEER_GAIN        60   /* proportional steering gain (40–100)         */
 #define SIDE_WEIGHT       50   /* how much side sensors steer (0–100)         */
@@ -74,7 +74,7 @@ static inline int clamp(int v, int lo, int hi)
  */
 #define REVERSE_TH       200   /* rear reading that triggers reverse          */
 #define REVERSE_SPEED    600   /* backward speed in REVERSE state             */
-#define REVERSE_CLEAR     80   /* rear must drop below this to exit REVERSE   */
+#define REVERSE_CLEAR     50   /* rear must drop below this to exit REVERSE   */
 /* ─────────────────────────────────────────────────────────────────────────  */
 
 /* Robot states */
@@ -203,7 +203,7 @@ int main(void)
             /* Too close in front → hold                                  */
             if (front > STOP_NEAR)
             {
-                state = HOLD;
+                state = REVERSE ;
                 break;
             }
 
@@ -259,7 +259,7 @@ int main(void)
             /* Lost object entirely → search                              */
             else if (front < LOST_TH && sides < LOST_TH)
             {
-                state = SEARCH;
+                state = HOLD;
             }
             break;
 
