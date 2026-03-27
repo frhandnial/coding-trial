@@ -43,6 +43,9 @@ motors_init();
 //play melody
 dac_start();
 playMelodyStart();
+chThdSleepMilliseconds(50);
+playMelody(STARWARS, ML_SIMPLE_PLAY, NULL);
+
 
 // /* Infinite loop. */ // const int TRIGGER=220; // const int RELEASE=500; // bool blocked=false;
 
@@ -51,7 +54,7 @@ playMelodyStart();
    const int SIDE_TH  = 500;   // side obstacle detection threshold
    const int DELTA    = 50;    // small margin to choose left vs right
 
-   playMelody(MARIO, ML_SIMPLE_PLAY, NULL);
+
 
    while (1)
    {
@@ -89,10 +92,15 @@ playMelodyStart();
                // more obstacle on left-front → pivot RIGHT
                left_motor_set_speed(675);
                right_motor_set_speed(-675);
+               playMelody(STARWARS, ML_SIMPLE_PLAY, NULL);
+               chThdSleepMilliseconds(50);
+
            } else {
                // more obstacle on right-front → pivot LEFT
                left_motor_set_speed(-675);
                right_motor_set_speed(675);
+               playMelody(STARWARS, ML_SIMPLE_PLAY, NULL);
+               chThdSleepMilliseconds(50);
            }
        }
        // 2) Side obstacles
@@ -101,17 +109,23 @@ playMelodyStart();
            left_motor_set_speed(-675);
            right_motor_set_speed(675);
            chThdSleepMilliseconds(50);
+           playMelody(STARWARS, ML_SIMPLE_PLAY, NULL);
+           chThdSleepMilliseconds(50);
        }
        else if (lside > SIDE_TH && rside <= SIDE_TH) {
            // obstacle on left, turn RIGHT
            left_motor_set_speed(675);
            right_motor_set_speed(-675);
            chThdSleepMilliseconds(50);
+           playMelody(STARWARS, ML_SIMPLE_PLAY, NULL);
+           chThdSleepMilliseconds(50);
        }
        // 3) Clear path, go straight
        else {
            left_motor_set_speed(1000);
            right_motor_set_speed(1000);
+           playMelody(STARWARS, ML_SIMPLE_PLAY, NULL);
+           chThdSleepMilliseconds(50);
        }
        set_rgb_led (LED8, 10, 0, 10);
        set_rgb_led (LED2, 10, 0, 10);
@@ -122,6 +136,8 @@ playMelodyStart();
        chThdSleepMilliseconds(50); // loop delay
    }
 
+   playMelody(STARWARS, ML_SIMPLE_PLAY, NULL);
+   chThdSleepMilliseconds(50);
 }
 
 #define STACK_CHK_GUARD 0xe2dee396
@@ -131,4 +147,5 @@ void __stack_chk_fail(void)
 {
 	chSysHalt("Stack smashing detected");
 }
+
 
