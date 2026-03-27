@@ -11,7 +11,9 @@
 #include "spi_comm.h"
 #include "sensors/proximity.h"
 #include "motors.h"
-#include "audio/play_melody.h" 
+#include "audio/audio_thread.h"
+#include "audio/play_melody.h"
+#include "audio/play_sound_file.h"
 
 
 messagebus_t bus;
@@ -19,12 +21,6 @@ MUTEX_DECL(bus_lock);
 CONDVAR_DECL(bus_condvar);
 
 static inline int imax(int a, int b){ return (a>b)?a:b; }
-static THD_WORKING_AREA(waMelody, 256);
-
-static THD_FUNCTION(MelodyThread, arg) {
-    (void)arg;
-    chRegSetThreadName("melody");
-
 
 int main(void) {
 
@@ -43,7 +39,10 @@ spi_comm_start();
 
 //Motors
 motors_init();
-chThdCreateStatic(waMelody, sizeof(waMelody), NORMALPRIO, MelodyThread, NULL);
+
+//play melody
+dac_start();
+playMelodyStart();
 
 // /* Infinite loop. */ // const int TRIGGER=220; // const int RELEASE=500; // bool blocked=false;
 
@@ -52,9 +51,12 @@ chThdCreateStatic(waMelody, sizeof(waMelody), NORMALPRIO, MelodyThread, NULL);
    const int SIDE_TH  = 500;   // side obstacle detection threshold
    const int DELTA    = 50;    // small margin to choose left vs right
 
+   playMelody(MARIO, ML_SIMPLE_PLAY, NULL);
+
    while (1)
    {
-       // FRONT sensors
+
+	   // FRONT sensors
        int rf = get_calibrated_prox(0); // front-right
        int lf = get_calibrated_prox(7); // front-left
 
@@ -64,6 +66,7 @@ chThdCreateStatic(waMelody, sizeof(waMelody), NORMALPRIO, MelodyThread, NULL);
 
        int front = imax(rf, lf); // overall front signal
 
+       //playing sound
 
        // 1) Head-on obstacle
        if (front > FRONT_TH) {
@@ -118,19 +121,6 @@ chThdCreateStatic(waMelody, sizeof(waMelody), NORMALPRIO, MelodyThread, NULL);
        set_body_led(2);
        chThdSleepMilliseconds(50); // loop delay
    }
-      playNote(2637,150); chThdSleepMilliseconds(150);
-      playNote(2637,150); chThdSleepMilliseconds(300);
-      playNote(2637,150); chThdSleepMilliseconds(300);
-
-      playNote(2093,150); chThdSleepMilliseconds(150);
-      playNote(2637,150); chThdSleepMilliseconds(300);
-
-      playNote(3136,150); chThdSleepMilliseconds(600);
-      playNote(1568,150); chThdSleepMilliseconds(600);
-
-        chThdSleepMilliseconds(500); // pause before repeating
-    }
-}
 
 }
 
@@ -141,3 +131,4 @@ void __stack_chk_fail(void)
 {
 	chSysHalt("Stack smashing detected");
 }
+
