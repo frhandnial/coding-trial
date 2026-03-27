@@ -1,0 +1,216 @@
+/*
+ * Task 2: Object following
+ *
+ * Behaviour:
+ *  - Robot slowly rotates in place searching for an object.
+ *  - When front OR side sensors detect something, it stops rotating and follows it.
+ *  - A STOP ZONE dead-band prevents the robot from crashing into the object.
+ *  - Steering is proportional, so it tracks smoothly without jiggling.
+ *  - Sensors 2 (side-right) and 5 (side-left) are now included for wider detection.
+ *
+ * Sensor layout (top view):
+ *        front
+ *    7        0
+ *  6            1
+ *  5            2
+ *    4        3
+ *        back
+ */
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <math.h>
+
+#include "ch.h"
+#include "hal.h"
+#include "memory_protection.h"
+#include <main.h>
+#include "leds.h"
+#include "spi_comm.h"
+#include "sensors/proximity.h"
+#include "motors.h"
+
+messagebus_t bus;
+MUTEX_DECL(bus_lock);
+CONDVAR_DECL(bus_condvar);
+
+static inline int imax(int a, int b) { return (a > b) ? a : b; }
+static inline int clamp(int v, int lo, int hi)
+{
+    return (v < lo) ? lo : (v > hi) ? hi : v;
+}
+
+/* ── Tunable parameters ─────────────────────────────────────────────────── */
+#define SEARCH_SPEED     500   /* slow rotation speed while searching         */
+#define BASE_SPEED       750   /* forward speed while following               */
+#define MAX_STEER        600   /* maximum steering correction added/subtracted*/
+
+/*
+ * DETECT_TH  – object must exceed this to leave SEARCH mode.
+ *              Set to 15 (near-minimum) for maximum detection range.
+ * STOP_NEAR  – robot stops (too close).
+ * STOP_FAR   – upper edge of the stop zone (comfortable distance).
+ *              Between STOP_NEAR and STOP_FAR the robot holds position.
+ * LOST_TH    – if front drops below this, re-enter SEARCH mode.
+ *              Set to 10 (near-minimum) so robot only loses target when
+ *              truly gone, not just briefly out of range.
+ */
+#define DETECT_TH        15    /* lowered from 100: detects at max range      */
+#define STOP_NEAR        650   /* increase this if robot still crashes        */
+#define STOP_FAR         300   /* comfortable following distance               */
+#define LOST_TH          10    /* lowered from 50: holds lock at max range    */
+
+/*
+ * Steering gain: error = (right_sensor - left_sensor).
+ * correction = error * STEER_GAIN / 100
+ * Raise STEER_GAIN if tracking feels sluggish; lower it to reduce jiggle.
+ *
+ * SIDE_WEIGHT: how much sensors 2 and 5 contribute relative to sensors 0 and 7.
+ * 50 = half weight. Increase toward 100 for more aggressive side response,
+ * decrease toward 0 to reduce side influence.
+ */
+#define STEER_GAIN        60   /* tune between 40-100                         */
+#define SIDE_WEIGHT       50   /* weight of side sensors (0-100)              */
+/* ─────────────────────────────────────────────────────────────────────────  */
+
+/* Robot states */
+typedef enum { SEARCH, FOLLOW, HOLD } State;
+
+int main(void)
+{
+    halInit();
+    chSysInit();
+    mpu_init();
+
+    /* Proximity */
+    messagebus_init(&bus, &bus_lock, &bus_condvar);
+    proximity_start(0);
+    calibrate_ir();
+
+    /* LEDs */
+    clear_leds();
+    spi_comm_start();
+
+    /* Motors */
+    motors_init();
+
+    State state = SEARCH;
+
+    while (1)
+    {
+        /* ── Read sensors ──────────────────────────────────────────────── */
+        int sr  = get_calibrated_prox(0);   /* front-right                  */
+        int sl  = get_calibrated_prox(7);   /* front-left                   */
+        int sr2 = get_calibrated_prox(2);   /* side-right                   */
+        int sl2 = get_calibrated_prox(5);   /* side-left                    */
+
+        int front = imax(sr, sl);           /* strongest front reading      */
+        int sides = imax(sr2, sl2);         /* strongest side reading       */
+
+        /* ── State machine ─────────────────────────────────────────────── */
+        switch (state)
+        {
+        /* ────────────────────────────────────────────────────────────────
+         * SEARCH: slowly rotate until an object is detected in front or side
+         * ──────────────────────────────────────────────────────────────── */
+        case SEARCH:
+            set_rgb_led(LED8, 0, 0, 1);
+            set_rgb_led(LED2, 0, 0, 1);
+            set_rgb_led(LED4, 0, 0, 1);
+            set_rgb_led(LED6, 0, 0, 1);
+            set_body_led(2);              /* toggle each loop               */
+            set_front_led(2);
+
+            left_motor_set_speed( SEARCH_SPEED);
+            right_motor_set_speed(-SEARCH_SPEED);   /* rotate clockwise     */
+
+            /* Trigger on front OR side sensors */
+            if (front > DETECT_TH || sides > DETECT_TH)
+            {
+                state = FOLLOW;
+            }
+            break;
+
+        /* ────────────────────────────────────────────────────────────────
+         * FOLLOW: track the object, steering proportionally using
+         *         both front sensors (0, 7) and side sensors (2, 5)
+         * ──────────────────────────────────────────────────────────────── */
+        case FOLLOW:
+            set_rgb_led(LED8, 1, 0, 1);
+            set_rgb_led(LED2, 1, 0, 1);
+            set_rgb_led(LED4, 1, 0, 1);
+            set_rgb_led(LED6, 1, 0, 1);
+            set_front_led(1);
+            set_body_led(1);
+
+            /* Lost the object on ALL sensors - go back to searching */
+            if (front < LOST_TH && sides < LOST_TH)
+            {
+                state = SEARCH;
+                break;
+            }
+
+            /* Too close - hold position */
+            if (front > STOP_NEAR)
+            {
+                state = HOLD;
+                break;
+            }
+
+            /* ── Proportional steering ──────────────────────────────────
+             * Combine front and side sensors with half-weight on sides.
+             * error > 0 → object more to the right → steer right
+             * error < 0 → object more to the left  → steer left
+             */
+            {
+                int right_total = sr + (sr2 * SIDE_WEIGHT) / 100;
+                int left_total  = sl + (sl2 * SIDE_WEIGHT) / 100;
+
+                int error      = right_total - left_total;
+                int correction = clamp((error * STEER_GAIN) / 100,
+                                       -MAX_STEER, MAX_STEER);
+
+                int left_spd  = clamp(BASE_SPEED + correction, -1000, 1000);
+                int right_spd = clamp(BASE_SPEED - correction, -1000, 1000);
+
+                left_motor_set_speed(left_spd);
+                right_motor_set_speed(right_spd);
+            }
+            break;
+
+        /* ────────────────────────────────────────────────────────────────
+         * HOLD: object is very close - stop and wait
+         * ──────────────────────────────────────────────────────────────── */
+        case HOLD:
+            set_rgb_led(LED8, 1, 0, 0);
+            set_rgb_led(LED2, 1, 0, 0);
+            set_rgb_led(LED4, 1, 0, 0);
+            set_rgb_led(LED6, 1, 0, 0);
+            set_body_led(1);
+            set_front_led(0);
+
+            left_motor_set_speed(0);
+            right_motor_set_speed(0);
+
+            /* Object moved away past comfortable zone → follow again */
+            if (front < STOP_FAR)
+            {
+                state = FOLLOW;
+            }
+            /* Lost object entirely on ALL sensors → search */
+            else if (front < LOST_TH && sides < LOST_TH)
+            {
+                state = SEARCH;
+            }
+            break;
+        }
+
+        chThdSleepMilliseconds(30);   /* loop period                          */
+    }
+}
+
+/* Stack guard */
+#define STACK_CHK_GUARD 0xe2dee396
+uintptr_t __stack_chk_guard = STACK_CHK_GUARD;
+void __stack_chk_fail(void) { chSysHalt("Stack smashing detected"); }
