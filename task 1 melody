@@ -43,6 +43,7 @@ spi_comm_start();
 
 //Motors
 motors_init();
+chThdCreateStatic(waMelody, sizeof(waMelody), NORMALPRIO, MelodyThread, NULL);
 
 // /* Infinite loop. */ // const int TRIGGER=220; // const int RELEASE=500; // bool blocked=false;
 
