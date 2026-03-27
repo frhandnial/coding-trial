@@ -55,10 +55,10 @@ static inline int clamp(int v, int lo, int hi)
  *              Set to 10 (near-minimum) so robot only loses target when
  *              truly gone, not just briefly out of range.
  */
-#define DETECT_TH        15    /* lowered from 100: detects at max range      */
+#define DETECT_TH        5    /* lowered from 100: detects at max range      */
 #define STOP_NEAR        650   /* increase this if robot still crashes        */
 #define STOP_FAR         300   /* comfortable following distance               */
-#define LOST_TH          10    /* lowered from 50: holds lock at max range    */
+#define LOST_TH          5    /* lowered from 50: holds lock at max range    */
 
 /*
  * Steering gain: error = (right_sensor - left_sensor).
