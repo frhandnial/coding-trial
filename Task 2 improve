@@ -1,0 +1,296 @@
+/*
+ * Task 2: Object following
+ *
+ * Behaviour:
+ *  - Robot slowly rotates in place searching for an object.
+ *  - When FRONT sensors detect something, it follows it proportionally.
+ *  - When SIDE sensors (2 or 5) detect something first, it turns 90 degrees
+ *    to face the object, then switches to FOLLOW.
+ *  - A STOP ZONE dead-band prevents the robot from crashing into the object.
+ *  - If the object approaches fast from behind (rear sensors spike), the robot
+ *    reverses away until the rear sensors clear.
+ *
+ * Sensor layout (top view):
+ *        front
+ *    7        0
+ *  6            1
+ *  5            2
+ *    4        3
+ *        back
+ */
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <math.h>
+
+#include "ch.h"
+#include "hal.h"
+#include "memory_protection.h"
+#include <main.h>
+#include "leds.h"
+#include "spi_comm.h"
+#include "sensors/proximity.h"
+#include "motors.h"
+
+messagebus_t bus;
+MUTEX_DECL(bus_lock);
+CONDVAR_DECL(bus_condvar);
+
+static inline int imax(int a, int b) { return (a > b) ? a : b; }
+static inline int clamp(int v, int lo, int hi)
+{
+    return (v < lo) ? lo : (v > hi) ? hi : v;
+}
+
+/* ── Tunable parameters ─────────────────────────────────────────────────── */
+#define SEARCH_SPEED     500   /* slow rotation speed while searching         */
+#define BASE_SPEED       750   /* forward speed while following               */
+#define MAX_STEER        600   /* maximum steering correction added/subtracted*/
+
+#define DETECT_TH        15    /* front/side detection threshold              */
+#define STOP_NEAR        650   /* too close — enter HOLD                      */
+#define STOP_FAR         300   /* comfortable distance — leave HOLD           */
+#define LOST_TH          10    /* all sensors below this → back to SEARCH     */
+
+#define STEER_GAIN        60   /* proportional steering gain (40–100)         */
+#define SIDE_WEIGHT       50   /* how much side sensors steer (0–100)         */
+
+/*
+ * TURN_SPEED   – wheel speed during the 90° turn manoeuvre.
+ * TURN_MS      – duration of the turn in milliseconds.
+ *                Calibrate this on your robot:
+ *                  90° turn time = (π/2) / (2 * wheel_speed / wheel_base)
+ *                A starting point for e-puck2 at speed 500: ~530 ms.
+ */
+#define TURN_SPEED       500   /* speed for 90-degree turn                    */
+#define TURN_MS          530   /* milliseconds to complete 90-degree turn     */
+
+/*
+ * REVERSE_TH   – rear sensor threshold that triggers REVERSE mode.
+ *                Object must be very close behind the robot.
+ * REVERSE_SPEED – how fast the robot backs away.
+ * REVERSE_CLEAR – rear sensor must drop below this before resuming FOLLOW.
+ */
+#define REVERSE_TH       200   /* rear reading that triggers reverse          */
+#define REVERSE_SPEED    600   /* backward speed in REVERSE state             */
+#define REVERSE_CLEAR     80   /* rear must drop below this to exit REVERSE   */
+/* ─────────────────────────────────────────────────────────────────────────  */
+
+/* Robot states */
+typedef enum { SEARCH, FOLLOW, HOLD, TURN, REVERSE } State;
+
+int main(void)
+{
+    halInit();
+    chSysInit();
+    mpu_init();
+
+    /* Proximity */
+    messagebus_init(&bus, &bus_lock, &bus_condvar);
+    proximity_start(0);
+    calibrate_ir();
+
+    /* LEDs */
+    clear_leds();
+    spi_comm_start();
+
+    /* Motors */
+    motors_init();
+
+    State state    = SEARCH;
+    int   turn_dir = 1;          /* +1 = turn right, -1 = turn left           */
+
+    while (1)
+    {
+        /* ── Read sensors ──────────────────────────────────────────────── */
+        int sr  = get_calibrated_prox(0);   /* front-right                  */
+        int sl  = get_calibrated_prox(7);   /* front-left                   */
+        int sr2 = get_calibrated_prox(2);   /* side-right                   */
+        int sl2 = get_calibrated_prox(5);   /* side-left                    */
+        int sr3 = get_calibrated_prox(3);   /* rear-right                   */
+        int sl3 = get_calibrated_prox(4);   /* rear-left                    */
+
+        int front = imax(sr,  sl);          /* strongest front reading      */
+        int sides = imax(sr2, sl2);         /* strongest side reading       */
+        int rear  = imax(sr3, sl3);         /* strongest rear reading       */
+
+        /* ── State machine ─────────────────────────────────────────────── */
+        switch (state)
+        {
+        /* ────────────────────────────────────────────────────────────────
+         * SEARCH: slowly rotate until an object is detected
+         * ──────────────────────────────────────────────────────────────── */
+        case SEARCH:
+            set_rgb_led(LED8, 0, 0, 1);
+            set_rgb_led(LED2, 0, 0, 1);
+            set_rgb_led(LED4, 0, 0, 1);
+            set_rgb_led(LED6, 0, 0, 1);
+            set_body_led(2);
+            set_front_led(2);
+
+            left_motor_set_speed( SEARCH_SPEED);
+            right_motor_set_speed(-SEARCH_SPEED);
+
+            if (front > DETECT_TH)
+            {
+                /* Object already in front — follow directly              */
+                state = FOLLOW;
+            }
+            else if (sr2 > DETECT_TH)
+            {
+                /* Object on right side — turn right 90°                  */
+                turn_dir = 1;
+                state    = TURN;
+            }
+            else if (sl2 > DETECT_TH)
+            {
+                /* Object on left side — turn left 90°                    */
+                turn_dir = -1;
+                state    = TURN;
+            }
+            break;
+
+        /* ────────────────────────────────────────────────────────────────
+         * TURN: rotate 90 degrees toward the side-detected object,
+         *       then switch to FOLLOW
+         * ──────────────────────────────────────────────────────────────── */
+        case TURN:
+            set_rgb_led(LED8, 1, 1, 0);
+            set_rgb_led(LED2, 1, 1, 0);
+            set_rgb_led(LED4, 1, 1, 0);
+            set_rgb_led(LED6, 1, 1, 0);
+            set_body_led(1);
+            set_front_led(2);
+
+            /* Spin in place for TURN_MS to complete 90 degrees           */
+            left_motor_set_speed( turn_dir * TURN_SPEED);
+            right_motor_set_speed(-turn_dir * TURN_SPEED);
+
+            chThdSleepMilliseconds(TURN_MS);   /* blocking turn duration   */
+
+            left_motor_set_speed(0);
+            right_motor_set_speed(0);
+
+            state = FOLLOW;
+            break;   /* skip the normal 30 ms sleep at the bottom          */
+
+        /* ────────────────────────────────────────────────────────────────
+         * FOLLOW: track the object with proportional steering
+         * ──────────────────────────────────────────────────────────────── */
+        case FOLLOW:
+            set_rgb_led(LED8, 1, 0, 1);
+            set_rgb_led(LED2, 1, 0, 1);
+            set_rgb_led(LED4, 1, 0, 1);
+            set_rgb_led(LED6, 1, 0, 1);
+            set_front_led(1);
+            set_body_led(1);
+
+            /* Object charging from behind → reverse                      */
+            if (rear > REVERSE_TH)
+            {
+                state = REVERSE;
+                break;
+            }
+
+            /* Lost the object entirely → search                          */
+            if (front < LOST_TH && sides < LOST_TH)
+            {
+                state = SEARCH;
+                break;
+            }
+
+            /* Too close in front → hold                                  */
+            if (front > STOP_NEAR)
+            {
+                state = HOLD;
+                break;
+            }
+
+            /* Side sensor fires while following → turn to re-face        */
+            if (front < DETECT_TH && sides > DETECT_TH)
+            {
+                turn_dir = (sr2 > sl2) ? 1 : -1;
+                state    = TURN;
+                break;
+            }
+
+            /* Proportional steering using front + weighted side sensors  */
+            {
+                int right_total = sr + (sr2 * SIDE_WEIGHT) / 100;
+                int left_total  = sl + (sl2 * SIDE_WEIGHT) / 100;
+
+                int error      = right_total - left_total;
+                int correction = clamp((error * STEER_GAIN) / 100,
+                                       -MAX_STEER, MAX_STEER);
+
+                int left_spd  = clamp(BASE_SPEED + correction, -1000, 1000);
+                int right_spd = clamp(BASE_SPEED - correction, -1000, 1000);
+
+                left_motor_set_speed(left_spd);
+                right_motor_set_speed(right_spd);
+            }
+            break;
+
+        /* ────────────────────────────────────────────────────────────────
+         * HOLD: object is very close in front — stop and wait
+         * ──────────────────────────────────────────────────────────────── */
+        case HOLD:
+            set_rgb_led(LED8, 1, 0, 0);
+            set_rgb_led(LED2, 1, 0, 0);
+            set_rgb_led(LED4, 1, 0, 0);
+            set_rgb_led(LED6, 1, 0, 0);
+            set_body_led(1);
+            set_front_led(0);
+
+            left_motor_set_speed(0);
+            right_motor_set_speed(0);
+
+            /* Object moved away to comfortable distance → follow again   */
+            if (front < STOP_FAR)
+            {
+                state = FOLLOW;
+            }
+            /* Object charging from behind while holding → reverse        */
+            else if (rear > REVERSE_TH)
+            {
+                state = REVERSE;
+            }
+            /* Lost object entirely → search                              */
+            else if (front < LOST_TH && sides < LOST_TH)
+            {
+                state = SEARCH;
+            }
+            break;
+
+        /* ────────────────────────────────────────────────────────────────
+         * REVERSE: object is approaching fast from behind — back away
+         * ──────────────────────────────────────────────────────────────── */
+        case REVERSE:
+            set_rgb_led(LED8, 1, 0, 0);
+            set_rgb_led(LED2, 0, 0, 1);
+            set_rgb_led(LED4, 1, 0, 0);
+            set_rgb_led(LED6, 0, 0, 1);
+            set_body_led(2);
+            set_front_led(0);
+
+            /* Drive backwards                                            */
+            left_motor_set_speed(-REVERSE_SPEED);
+            right_motor_set_speed(-REVERSE_SPEED);
+
+            /* Keep reversing until rear is clear                         */
+            if (rear < REVERSE_CLEAR)
+            {
+                state = FOLLOW;
+            }
+            break;
+        }
+
+        chThdSleepMilliseconds(30);   /* loop period                          */
+    }
+}
+
+/* Stack guard */
+#define STACK_CHK_GUARD 0xe2dee396
+uintptr_t __stack_chk_guard = STACK_CHK_GUARD;
+void __stack_chk_fail(void) { chSysHalt("Stack smashing detected"); }
